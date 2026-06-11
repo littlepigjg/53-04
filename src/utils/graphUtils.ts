@@ -91,16 +91,26 @@ export function computeGraphBoundingBox(
   let minY = Infinity;
   let maxY = -Infinity;
   for (const n of nodes) {
-    if (n.x === undefined || n.y === undefined) continue;
-    minX = Math.min(minX, n.x);
-    maxX = Math.max(maxX, n.x);
-    minY = Math.min(minY, n.y);
-    maxY = Math.max(maxY, n.y);
+    if (n.x !== undefined && isFinite(n.x)) {
+      minX = Math.min(minX, n.x);
+      maxX = Math.max(maxX, n.x);
+    }
+    if (n.y !== undefined && isFinite(n.y)) {
+      minY = Math.min(minY, n.y);
+      maxY = Math.max(maxY, n.y);
+    }
   }
-  if (!isFinite(minX)) {
+  const hasX = isFinite(minX);
+  const hasY = isFinite(minY);
+  if (!hasX && !hasY) {
     return { minX: 0, maxX: 0, minY: 0, maxY: 0 };
   }
-  return { minX, maxX, minY, maxY };
+  return {
+    minX: hasX ? minX : 0,
+    maxX: hasX ? maxX : 0,
+    minY: hasY ? minY : 0,
+    maxY: hasY ? maxY : 0,
+  };
 }
 
 export function getNodeRadius(frequency: number): number {

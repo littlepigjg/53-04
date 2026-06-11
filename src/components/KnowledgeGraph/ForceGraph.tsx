@@ -59,12 +59,20 @@ export function ForceGraph({
   const nodesRef = useRef<GraphNode[]>([]);
   const linksRef = useRef<GraphLink[]>([]);
   const viewportRef = useRef<{ width: number; height: number }>({ width: 0, height: 0 });
-  const forceRenderAllRef = useRef(false);
+  const onClickRef = useRef(onEntityClick);
+  const onDoubleClickRef = useRef(onEntityDoubleClick);
+  const onHoverRef = useRef(onEntityHover);
+  const searchMatchIdsRef = useRef<Set<string>>(new Set());
 
   const [loadingProgress, setLoadingProgress] = useState(0);
   const [isLoadingIncremental, setIsLoadingIncremental] = useState(false);
   const [renderedCount, setRenderedCount] = useState(INCREMENTAL_BATCH_SIZE);
   const [exportPhase, setExportPhase] = useState<string | null>(null);
+  const [forceRenderAll, setForceRenderAll] = useState(false);
+
+  useEffect(() => { onClickRef.current = onEntityClick; }, [onEntityClick]);
+  useEffect(() => { onDoubleClickRef.current = onEntityDoubleClick; }, [onEntityDoubleClick]);
+  useEffect(() => { onHoverRef.current = onEntityHover; }, [onEntityHover]);
 
   const filteredEntities = useMemo(
     () => entities.filter((e) => entityTypeFilter.includes(e.type)),
@@ -97,14 +105,14 @@ export function ForceGraph({
   const useIncrementalLoading = filteredEntities.length > VIRTUALIZATION_THRESHOLD;
 
   const visibleEntities = useMemo<Entity[]>(() => {
-    if (forceRenderAllRef.current) return sortedEntities;
+    if (forceRenderAll) return sortedEntities;
     const topCount = useIncrementalLoading
       ? Math.min(renderedCount, sortedEntities.length)
       : sortedEntities.length;
     const topSet = new Set(sortedEntities.slice(0, topCount).map((e) => e.id));
     pinnedEntityIds.forEach((id) => topSet.add(id));
     return sortedEntities.filter((e) => topSet.has(e.id));
-  }, [sortedEntities, renderedCount, useIncrementalLoading, pinnedEntityIds]);
+  }, [sortedEntities, renderedCount, useIncrementalLoading, pinnedEntityIds, forceRenderAll]);
 
   const visibleEntityIds = useMemo(
     () => new Set(visibleEntities.map((e) => e.id)),
@@ -129,12 +137,16 @@ export function ForceGraph({
     );
   }, [sortedEntities, searchQuery]);
 
+  useEffect(() => {
+    searchMatchIdsRef.current = searchMatchIds;
+  }, [searchMatchIds]);
+
   const effectiveCount = useIncrementalLoading
     ? Math.min(renderedCount, sortedEntities.length)
     : sortedEntities.length;
 
   useEffect(() => {
-    if (!useIncrementalLoading || forceRenderAllRef.current) return;
+    if (!useIncrementalLoading || forceRenderAll) return;
     if (renderedCount >= sortedEntities.length) {
       setIsLoadingIncremental(false);
       return;
@@ -155,24 +167,30 @@ export function ForceGraph({
     };
     requestAnimationFrame(loadBatch);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [useIncrementalLoading, sortedEntities.length]);
+  }, [useIncrementalLoading, sortedEntities.length, forceRenderAll]);
 
   useEffect(() => {
-    if (forceRenderAllRef.current) return;
+    if (forceRenderAll) return;
     setRenderedCount(
       useIncrementalLoading ? Math.min(INCREMENTAL_BATCH_SIZE, sortedEntities.length) : sortedEntities.length
     );
-  }, [sortedEntities, useIncrementalLoading]);
+  }, [sortedEntities, useIncrementalLoading, forceRenderAll]);
 
   const ensureAllRendered = useCallback(async () => {
-    forceRenderAllRef.current = true;
+    setForceRenderAll(true);
     return new Promise<void>((resolve) => {
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
-          resolve();
+          requestAnimationFrame(() => {
+            resolve();
+          });
         });
       });
     });
+  }, []);
+
+  const finishExport = useCallback(() => {
+    setForceRenderAll(false);
   }, []);
 
   const { exportPng, exportSvg } = useForceGraphExport({
@@ -199,8 +217,8 @@ export function ForceGraph({
           setExportPhase(msg[phase] ?? null);
         },
         () => {
-          forceRenderAllRef.current = false;
-          setTimeout(() => setExportPhase(null), 300);
+          finishExport();
+          setTimeout(() => setExportPhase(null), 400);
         }
       );
     };
@@ -217,12 +235,12 @@ export function ForceGraph({
           setExportPhase(msg[phase] ?? null);
         },
         () => {
-          forceRenderAllRef.current = false;
-          setTimeout(() => setExportPhase(null), 300);
+          finishExport();
+          setTimeout(() => setExportPhase(null), 400);
         }
       );
     };
-  }, [exportPng, exportSvg, exportPngRef, exportSvgRef]);
+  }, [exportPng, exportSvg, exportPngRef, exportSvgRef, finishExport]);
 
   const buildGraph = useCallback(() => {
     const svgEl = svgRef.current;
@@ -353,7 +371,8 @@ export function ForceGraph({
   useEffect(() => {
     const simulation = simulationRef.current;
     const g = gRef.current;
-    if (!simulation || !g) return;
+    const container = containerRef.current;
+    if (!simulation || !g || !container) return;
 
     const existingNodeMap = new Map(nodesRef.current.map((n) => [n.id, n]));
     const newNodes: GraphNode[] = visibleEntities.map((e) => {
@@ -414,8 +433,7 @@ export function ForceGraph({
           ? `url(#arrow-${d.relationType})`
           : null
       );
-    const allLinks = linkEnter.merge(linkSel);
-    allLinks
+    linkEnter.merge(linkSel)
       .attr('stroke', (d) => RELATION_COLORS[d.relationType])
       .attr('stroke-width', (d) => Math.max(1, d.weight));
 
@@ -434,12 +452,7 @@ export function ForceGraph({
       .style('user-select', 'none')
       .attr('opacity', 0.7);
 
-    const nodeSel = g.select('.nodes')
-      .selectAll<SVGCircleElement, GraphNode>('circle')
-      .data(newNodes, (d) => d.id);
-    nodeSel.exit().remove();
-
-    const tooltip = d3.select(containerRef.current!).select('.kg-tooltip');
+    const tooltip = d3.select(container).select('.kg-tooltip');
 
     const dragBehavior = d3.drag<SVGCircleElement, GraphNode>()
       .on('start', (event, d) => {
@@ -457,6 +470,10 @@ export function ForceGraph({
         d.fy = null;
       });
 
+    const nodeSel = g.select('.nodes')
+      .selectAll<SVGCircleElement, GraphNode>('circle')
+      .data(newNodes, (d) => d.id);
+    nodeSel.exit().remove();
     const nodeEnter = nodeSel.enter()
       .append('circle')
       .attr('r', (d) => getNodeRadius(d.frequency))
@@ -468,7 +485,7 @@ export function ForceGraph({
 
     nodeEnter
       .on('mouseover', (_event, d) => {
-        onEntityHover(d.id);
+        onHoverRef.current?.(d.id);
         if (!tooltip.empty()) {
           tooltip
             .style('opacity', 1)
@@ -493,18 +510,18 @@ export function ForceGraph({
         }
       })
       .on('mouseout', () => {
-        onEntityHover(null);
+        onHoverRef.current?.(null);
         if (!tooltip.empty()) tooltip.style('opacity', 0);
       })
       .on('click', (_event, d) => {
         const now = Date.now();
         const last = lastClickRef.current;
         if (last.id === d.id && now - last.time < 350) {
-          onEntityDoubleClick(d.id);
+          onDoubleClickRef.current?.(d.id);
           lastClickRef.current = { id: '', time: 0 };
         } else {
           lastClickRef.current = { id: d.id, time: now };
-          onEntityClick(d.id);
+          onClickRef.current?.(d.id);
         }
       });
 
@@ -525,7 +542,7 @@ export function ForceGraph({
       .attr('dy', (d) => getNodeRadius(d.frequency) + 14)
       .attr('pointer-events', 'none')
       .style('user-select', 'none');
-  }, [visibleEntities, visibleRelations, onEntityClick, onEntityDoubleClick, onEntityHover]);
+  }, [visibleEntities, visibleRelations]);
 
   useEffect(() => {
     const g = gRef.current;
@@ -548,7 +565,7 @@ export function ForceGraph({
         }
       }
       nodeSel.transition().duration(200)
-        .attr('opacity', (d) => connected.has(d.id) ? 1 : 0.12)
+        .attr('opacity', (d) => (connected.has(d.id) ? 1 : 0.12))
         .attr('stroke-width', (d) => (d.id === activeId ? 4 : 2))
         .attr('stroke', (d) => (d.id === activeId ? '#fbbf24' : '#fff'))
         .attr('filter', (d) => (d.id === activeId ? 'url(#glow)' : null));
@@ -566,7 +583,7 @@ export function ForceGraph({
             : Math.max(0.5, d.weight * 0.5);
         });
       labelSel.transition().duration(200)
-        .attr('opacity', (d) => connected.has(d.id) ? 1 : 0.08);
+        .attr('opacity', (d) => (connected.has(d.id) ? 1 : 0.08));
       linkLabelSel.transition().duration(200)
         .attr('opacity', (d) => {
           const s = (d.source as GraphNode).id;
@@ -574,18 +591,20 @@ export function ForceGraph({
           return s === activeId || t === activeId ? 0.9 : 0.05;
         });
     } else {
+      const sm = searchMatchIdsRef.current;
+      const hasSearch = sm && sm.size > 0;
       nodeSel.transition().duration(200)
-        .attr('opacity', (d) => searchMatchIds.size > 0 ? (searchMatchIds.has(d.id) ? 1 : 0.25) : 1)
+        .attr('opacity', (d) => (hasSearch ? (sm.has(d.id) ? 1 : 0.25) : 1))
         .attr('stroke-width', 2)
         .attr('stroke', '#fff')
         .attr('filter', null);
       linkSel.transition().duration(200)
-        .attr('stroke-opacity', searchMatchIds.size > 0 ? 0.15 : 0.4)
+        .attr('stroke-opacity', hasSearch ? 0.15 : 0.4)
         .attr('stroke-width', (d) => Math.max(1, d.weight));
       labelSel.transition().duration(200)
-        .attr('opacity', (d) => searchMatchIds.size > 0 ? (searchMatchIds.has(d.id) ? 1 : 0.15) : 1);
+        .attr('opacity', (d) => (hasSearch ? (sm.has(d.id) ? 1 : 0.15) : 1));
       linkLabelSel.transition().duration(200)
-        .attr('opacity', searchMatchIds.size > 0 ? 0.1 : 0.7);
+        .attr('opacity', hasSearch ? 0.1 : 0.7);
     }
   }, [selectedEntityId, hoveredEntityId, searchMatchIds]);
 
@@ -595,17 +614,24 @@ export function ForceGraph({
     const zoom = zoomRef.current;
     if (!svgEl || !zoom) return;
 
-    const attempt = (retriesRemaining: number) => {
+    let attempts = 0;
+    const maxAttempts = 30;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const attempt = () => {
+      attempts++;
       const target = nodesRef.current.find((n) => searchMatchIds.has(n.id));
-      if (!target || target.x === undefined || target.y === undefined) {
-        if (retriesRemaining > 0) {
-          setTimeout(() => attempt(retriesRemaining - 1), 60);
+      if (!target || target.x === undefined || target.y === undefined || isNaN(target.x) || isNaN(target.y)) {
+        if (attempts < maxAttempts) {
+          timer = setTimeout(attempt, 50);
         }
         return;
       }
       const vp = viewportRef.current;
-      if (vp.width <= 0) {
-        setTimeout(() => attempt(retriesRemaining - 1), 60);
+      if (vp.width <= 0 || vp.height <= 0) {
+        if (attempts < maxAttempts) {
+          timer = setTimeout(attempt, 50);
+        }
         return;
       }
       const targetK = 1.2;
@@ -614,12 +640,16 @@ export function ForceGraph({
       d3.select(svgEl).transition().duration(750).ease(d3.easeCubicOut)
         .call(zoom.transform, d3.zoomIdentity.translate(targetX, targetY).scale(targetK));
     };
-    attempt(20);
+    attempt();
+
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
   }, [searchMatchIds]);
 
   const getMinimapNodes = () =>
     nodesRef.current
-      .filter((n) => n.x !== undefined && n.y !== undefined)
+      .filter((n) => n.x !== undefined && n.y !== undefined && isFinite(n.x) && isFinite(n.y))
       .map((n) => ({ id: n.id, type: n.type, x: n.x!, y: n.y! }));
 
   const getViewport = () => {
@@ -632,7 +662,7 @@ export function ForceGraph({
     <div ref={containerRef} className="relative h-full w-full overflow-hidden bg-slate-50">
       <svg ref={svgRef} className="h-full w-full" />
 
-      {isLoadingIncremental && (
+      {isLoadingIncremental && !forceRenderAll && (
         <div className="pointer-events-none absolute top-4 left-1/2 -translate-x-1/2 rounded-full bg-white/90 px-4 py-2 text-xs text-slate-600 shadow-lg backdrop-blur-sm">
           正在加载节点… {loadingProgress}% ({effectiveCount}/{sortedEntities.length})
         </div>
@@ -644,7 +674,7 @@ export function ForceGraph({
         </div>
       )}
 
-      {useVirtualization && !forceRenderAllRef.current && (
+      {useVirtualization && !forceRenderAll && (
         <div className="pointer-events-none absolute top-4 right-4 rounded-full bg-slate-100/80 px-3 py-1 text-[10px] text-slate-500 backdrop-blur-sm">
           虚拟化 · {visibleEntities.length} 个节点
         </div>

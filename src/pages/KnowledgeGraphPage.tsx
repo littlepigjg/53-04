@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import {
   ArrowLeft,
@@ -78,29 +78,29 @@ export function KnowledgeGraphPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchInput]);
 
-  const handleEntityTypeClick = (type: EntityType) => {
+  const handleEntityTypeClick = useCallback((type: EntityType) => {
     const newFilter = entityTypeFilter.includes(type)
       ? entityTypeFilter.filter((t) => t !== type)
       : [...entityTypeFilter, type];
     if (newFilter.length > 0) setEntityTypeFilter(newFilter);
-  };
+  }, [entityTypeFilter, setEntityTypeFilter]);
 
-  const handleEntityClick = (entityId: string) => {
+  const handleEntityClick = useCallback((entityId: string) => {
     selectEntity(entityId);
     setShowParagraphPanel(true);
-  };
+  }, [selectEntity]);
 
-  const handleEntityDoubleClick = (entityId: string) => {
-    expandEntity(entityId);
-  };
+  const handleEntityDoubleClick = useCallback((entityId: string) => {
+    void expandEntity(entityId);
+  }, [expandEntity]);
 
-  const handleExportPng = () => {
+  const handleExportPng = useCallback(() => {
     exportPngRef.current?.();
-  };
+  }, []);
 
-  const handleExportSvg = () => {
+  const handleExportSvg = useCallback(() => {
     exportSvgRef.current?.();
-  };
+  }, []);
 
   const highlightedParagraphs = useMemo(() => {
     if (highlightParagraphIds.length === 0) return [];
