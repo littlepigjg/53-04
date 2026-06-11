@@ -47,6 +47,50 @@ export interface Annotation {
   updatedAt: string;
 }
 
+export type EntityType = 'person' | 'location' | 'organization' | 'term';
+
+export type RelationType = 'citation' | 'dependency' | 'comparison' | 'cooccurrence';
+
+export type SentimentType = 'positive' | 'neutral' | 'negative';
+
+export interface Entity {
+  id: string;
+  name: string;
+  type: EntityType;
+  frequency: number;
+  docIds: string[];
+  paragraphIds: string[];
+  summary: string;
+  sentiment: SentimentType;
+  sentimentScore: number;
+}
+
+export interface Relation {
+  id: string;
+  sourceId: string;
+  targetId: string;
+  type: RelationType;
+  weight: number;
+  evidence: string[];
+}
+
+export interface KnowledgeGraph {
+  entities: Entity[];
+  relations: Relation[];
+}
+
+export interface EntityStats {
+  totalEntities: number;
+  totalRelations: number;
+  byType: Record<EntityType, number>;
+  byRelationType: Record<RelationType, number>;
+  topEntities: Array<{
+    entity: Entity;
+    relationCount: number;
+  }>;
+  sentimentDistribution: Record<SentimentType, number>;
+}
+
 export interface ReviewSummary {
   docId: string;
   totalAnnotations: number;

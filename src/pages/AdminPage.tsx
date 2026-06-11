@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useSearchParams } from 'react-router-dom';
 import {
   FileText,
   ArrowLeft,
@@ -11,6 +11,7 @@ import {
   Wand2,
   MessageSquare,
   Clock,
+  Network,
 } from 'lucide-react';
 import { documentsApi, annotationsApi, reviewApi, exportApi } from '../utils/api';
 import type {
@@ -31,6 +32,7 @@ type FilterType = 'all' | AnnotationType;
 
 export function AdminPage() {
   const { docId } = useParams<{ docId: string }>();
+  const [searchParams] = useSearchParams();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [docMeta, setDocMeta] = useState<DocumentMeta | null>(null);
@@ -40,7 +42,8 @@ export function AdminPage() {
   const [statusFilter, setStatusFilter] = useState<FilterStatus>('all');
   const [typeFilter, setTypeFilter] = useState<FilterType>('all');
   const [reviewerFilter, setReviewerFilter] = useState<string>('all');
-  const [selectedParagraphId, setSelectedParagraphId] = useState<string | null>(null);
+  const highlightFromUrl = searchParams.get('highlight');
+  const [selectedParagraphId, setSelectedParagraphId] = useState<string | null>(highlightFromUrl);
   const [copied, setCopied] = useState(false);
 
   const loadAll = async () => {
@@ -72,6 +75,17 @@ export function AdminPage() {
   useEffect(() => {
     loadAll();
   }, [docId]);
+
+  useEffect(() => {
+    if (highlightFromUrl && parsed) {
+      setTimeout(() => {
+        const el = document.getElementById(`paragraph-${highlightFromUrl}`);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }, 100);
+    }
+  }, [highlightFromUrl, parsed]);
 
   const filtered = useMemo(() => {
     return annotations.filter((a) => {
@@ -181,6 +195,12 @@ export function AdminPage() {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <Link
+              to={`/knowledge-graph/${docId}`}
+              className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+            >
+              <Network size={14} /> 知识图谱
+            </Link>
             <button
               onClick={handleCopyShare}
               className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"

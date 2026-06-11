@@ -7,6 +7,7 @@ import shareRouter from './routes/share.js';
 import annotationsRouter from './routes/annotations.js';
 import reviewRouter from './routes/review.js';
 import exportRouter from './routes/export.js';
+import knowledgeGraphRouter from './routes/knowledgeGraph.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { FileStorageService } from './services/FileStorageService.js';
 
@@ -29,14 +30,15 @@ app.use('/api/share', shareRouter);
 app.use('/api/annotations', annotationsRouter);
 app.use('/api/review', reviewRouter);
 app.use('/api/export', exportRouter);
+app.use('/api/knowledge-graph', knowledgeGraphRouter);
 
-app.get(['/', '/review/*', '/admin/*'], (_req, res) => {
+app.get(['/', '/review/*', '/admin/*', '/knowledge-graph/*'], (_req, res) => {
   res.sendFile(path.join(distDir, 'index.html'));
 });
 
 app.use(errorHandler);
 
-const PORT = process.env.PORT ? Number(process.env.PORT) : 3002;
+const PORT = process.env.PORT ? Number(process.env.PORT) : 3003;
 
 app.listen(PORT, () => {
   console.log(`Server listening on http://localhost:${PORT}`);

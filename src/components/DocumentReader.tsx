@@ -43,6 +43,7 @@ export function DocumentReader({
         return (
           <div
             key={p.id}
+            id={`paragraph-${p.id}`}
             onClick={() => handleClick(p)}
             className={`group relative -mx-2 rounded-lg px-2 py-1.5 transition-colors ${
               interactive ? 'cursor-pointer' : ''

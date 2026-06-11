@@ -13,8 +13,10 @@
     "dev": "concurrently \"npm run client:dev\" \"npm run server:dev\""
   },
   "dependencies": {
+    "@types/d3": "^7.4.3",
     "clsx": "^2.1.1",
     "cors": "^2.8.5",
+    "d3": "^7.9.0",
     "dotenv": "^17.2.1",
     "express": "^4.21.2",
     "lucide-react": "^0.511.0",

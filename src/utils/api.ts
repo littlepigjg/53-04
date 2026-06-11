@@ -4,6 +4,8 @@ import type {
   Annotation,
   ReviewSummary,
   AnnotationStatus,
+  KnowledgeGraph,
+  EntityStats,
 } from '../types';
 
 const API_BASE = '/api';
@@ -79,4 +81,17 @@ export const exportApi = {
         'document.md',
       text: await r.text(),
     })),
+};
+
+export const knowledgeGraphApi = {
+  forDocument: (docId: string) =>
+    request<KnowledgeGraph>(`/knowledge-graph/document/${docId}`),
+  forAll: () => request<KnowledgeGraph>('/knowledge-graph/all'),
+  statsForDocument: (docId: string) =>
+    request<EntityStats>(`/knowledge-graph/stats/document/${docId}`),
+  statsForAll: () => request<EntityStats>('/knowledge-graph/stats/all'),
+  expand: (entityId: string, depth: number = 1) =>
+    request<{ entities: import('../types').Entity[]; relations: import('../types').Relation[] }>(
+      `/knowledge-graph/expand/${entityId}?depth=${depth}`
+    ),
 };

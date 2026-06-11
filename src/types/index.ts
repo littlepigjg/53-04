@@ -8,4 +8,11 @@ export type {
   ParsedDocument,
   Annotation,
   ReviewSummary,
+  EntityType,
+  RelationType,
+  SentimentType,
+  Entity,
+  Relation,
+  KnowledgeGraph,
+  EntityStats,
 } from '../../shared/types';
