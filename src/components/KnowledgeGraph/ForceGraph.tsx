@@ -1,24 +1,24 @@
 import { useEffect, useRef, useCallback, useMemo, useState } from 'react';
 import * as d3 from 'd3';
 import type { Entity, Relation, EntityType, RelationType } from '../../types';
-
-interface GraphNode extends d3.SimulationNodeDatum {
-  id: string;
-  name: string;
-  type: EntityType;
-  frequency: number;
-  sentiment: string;
-  summary: string;
-  paragraphIds: string[];
-  docIds: string[];
-}
-
-interface GraphLink extends d3.SimulationLinkDatum<GraphNode> {
-  id: string;
-  relationType: RelationType;
-  weight: number;
-  evidence: string[];
-}
+import {
+  ENTITY_COLORS,
+  RELATION_COLORS,
+  ENTITY_LABELS,
+  RELATION_LABELS,
+  VIRTUALIZATION_THRESHOLD,
+  INCREMENTAL_BATCH_SIZE,
+  FORCE_LINK_DISTANCE,
+  FORCE_CHARGE_STRENGTH,
+} from '../../utils/graphConstants';
+import { getNodeRadius } from '../../utils/graphUtils';
+import { GraphLegend } from './GraphLegend';
+import { GraphMinimap } from './GraphMinimap';
+import {
+  useForceGraphExport,
+  type GraphNode,
+  type GraphLink,
+} from '../../hooks/useForceGraphExport';
 
 interface ForceGraphProps {
   entities: Entity[];
@@ -26,6 +26,7 @@ interface ForceGraphProps {
   selectedEntityId: string | null;
   hoveredEntityId: string | null;
   entityTypeFilter: EntityType[];
+  pinnedEntityIds: Set<string>;
   searchQuery: string;
   onEntityClick: (entityId: string) => void;
   onEntityDoubleClick: (entityId: string) => void;
@@ -34,43 +35,13 @@ interface ForceGraphProps {
   exportSvgRef: React.MutableRefObject<(() => void) | null>;
 }
 
-const ENTITY_COLORS: Record<EntityType, string> = {
-  person: '#3b82f6',
-  location: '#10b981',
-  organization: '#8b5cf6',
-  term: '#f59e0b',
-};
-
-const RELATION_COLORS: Record<RelationType, string> = {
-  citation: '#ef4444',
-  dependency: '#3b82f6',
-  comparison: '#f59e0b',
-  cooccurrence: '#94a3b8',
-};
-
-const ENTITY_LABELS: Record<EntityType, string> = {
-  person: '人物',
-  location: '地点',
-  organization: '组织',
-  term: '术语',
-};
-
-const RELATION_LABELS: Record<RelationType, string> = {
-  citation: '引用',
-  dependency: '依赖',
-  comparison: '对比',
-  cooccurrence: '共现',
-};
-
-const VIRTUALIZATION_THRESHOLD = 200;
-const INCREMENTAL_BATCH_SIZE = 50;
-
 export function ForceGraph({
   entities,
   relations,
   selectedEntityId,
   hoveredEntityId,
   entityTypeFilter,
+  pinnedEntityIds,
   searchQuery,
   onEntityClick,
   onEntityDoubleClick,
@@ -87,11 +58,13 @@ export function ForceGraph({
   const zoomRef = useRef<d3.ZoomBehavior<SVGSVGElement, unknown> | null>(null);
   const nodesRef = useRef<GraphNode[]>([]);
   const linksRef = useRef<GraphLink[]>([]);
-  const minimapSvgRef = useRef<SVGSVGElement>(null);
   const viewportRef = useRef<{ width: number; height: number }>({ width: 0, height: 0 });
+  const forceRenderAllRef = useRef(false);
+
   const [loadingProgress, setLoadingProgress] = useState(0);
   const [isLoadingIncremental, setIsLoadingIncremental] = useState(false);
   const [renderedCount, setRenderedCount] = useState(INCREMENTAL_BATCH_SIZE);
+  const [exportPhase, setExportPhase] = useState<string | null>(null);
 
   const filteredEntities = useMemo(
     () => entities.filter((e) => entityTypeFilter.includes(e.type)),
@@ -111,17 +84,40 @@ export function ForceGraph({
     [relations, filteredEntityIds]
   );
 
-  const sortedEntities = useMemo(
-    () => [...filteredEntities].sort((a, b) => b.frequency - a.frequency),
-    [filteredEntities]
-  );
+  const sortedEntities = useMemo(() => {
+    return [...filteredEntities].sort((a, b) => {
+      const aPinned = pinnedEntityIds.has(a.id) ? 1 : 0;
+      const bPinned = pinnedEntityIds.has(b.id) ? 1 : 0;
+      if (aPinned !== bPinned) return bPinned - aPinned;
+      return b.frequency - a.frequency;
+    });
+  }, [filteredEntities, pinnedEntityIds]);
 
   const useVirtualization = filteredEntities.length > VIRTUALIZATION_THRESHOLD;
   const useIncrementalLoading = filteredEntities.length > VIRTUALIZATION_THRESHOLD;
 
-  const effectiveCount = useIncrementalLoading
-    ? Math.min(renderedCount, sortedEntities.length)
-    : sortedEntities.length;
+  const visibleEntities = useMemo<Entity[]>(() => {
+    if (forceRenderAllRef.current) return sortedEntities;
+    const topCount = useIncrementalLoading
+      ? Math.min(renderedCount, sortedEntities.length)
+      : sortedEntities.length;
+    const topSet = new Set(sortedEntities.slice(0, topCount).map((e) => e.id));
+    pinnedEntityIds.forEach((id) => topSet.add(id));
+    return sortedEntities.filter((e) => topSet.has(e.id));
+  }, [sortedEntities, renderedCount, useIncrementalLoading, pinnedEntityIds]);
+
+  const visibleEntityIds = useMemo(
+    () => new Set(visibleEntities.map((e) => e.id)),
+    [visibleEntities]
+  );
+
+  const visibleRelations = useMemo(
+    () =>
+      filteredRelations.filter(
+        (r) => visibleEntityIds.has(r.sourceId) && visibleEntityIds.has(r.targetId)
+      ),
+    [filteredRelations, visibleEntityIds]
+  );
 
   const searchMatchIds = useMemo(() => {
     if (!searchQuery.trim()) return new Set<string>();
@@ -133,17 +129,19 @@ export function ForceGraph({
     );
   }, [sortedEntities, searchQuery]);
 
+  const effectiveCount = useIncrementalLoading
+    ? Math.min(renderedCount, sortedEntities.length)
+    : sortedEntities.length;
+
   useEffect(() => {
-    if (!useIncrementalLoading) return;
+    if (!useIncrementalLoading || forceRenderAllRef.current) return;
     if (renderedCount >= sortedEntities.length) {
       setIsLoadingIncremental(false);
       return;
     }
-
     setIsLoadingIncremental(true);
     let current = renderedCount;
     const total = sortedEntities.length;
-
     const loadBatch = () => {
       const next = Math.min(current + INCREMENTAL_BATCH_SIZE, total);
       setRenderedCount(next);
@@ -155,18 +153,78 @@ export function ForceGraph({
         setIsLoadingIncremental(false);
       }
     };
-
     requestAnimationFrame(loadBatch);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [useIncrementalLoading, sortedEntities.length]);
 
   useEffect(() => {
+    if (forceRenderAllRef.current) return;
     setRenderedCount(
       useIncrementalLoading ? Math.min(INCREMENTAL_BATCH_SIZE, sortedEntities.length) : sortedEntities.length
     );
   }, [sortedEntities, useIncrementalLoading]);
 
-  const initGraph = useCallback(() => {
+  const ensureAllRendered = useCallback(async () => {
+    forceRenderAllRef.current = true;
+    return new Promise<void>((resolve) => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          resolve();
+        });
+      });
+    });
+  }, []);
+
+  const { exportPng, exportSvg } = useForceGraphExport({
+    svgRef,
+    simulationRef,
+    gRef,
+    zoomRef,
+    nodesRef,
+    viewportRef,
+    ensureAllRendered,
+  });
+
+  useEffect(() => {
+    exportPngRef.current = () => {
+      setExportPhase('正在准备导出…');
+      void exportPng(
+        ({ phase, progress }) => {
+          const msg: Record<string, string> = {
+            'export:preparing': '准备画布…',
+            'export:stabilizing': `稳定布局…${progress}%`,
+            'export:rendering': `渲染图片…${progress}%`,
+            'export:done': '导出完成',
+          };
+          setExportPhase(msg[phase] ?? null);
+        },
+        () => {
+          forceRenderAllRef.current = false;
+          setTimeout(() => setExportPhase(null), 300);
+        }
+      );
+    };
+    exportSvgRef.current = () => {
+      setExportPhase('正在准备导出…');
+      void exportSvg(
+        ({ phase, progress }) => {
+          const msg: Record<string, string> = {
+            'export:preparing': '准备画布…',
+            'export:stabilizing': `稳定布局…${progress}%`,
+            'export:rendering': `渲染 SVG…${progress}%`,
+            'export:done': '导出完成',
+          };
+          setExportPhase(msg[phase] ?? null);
+        },
+        () => {
+          forceRenderAllRef.current = false;
+          setTimeout(() => setExportPhase(null), 300);
+        }
+      );
+    };
+  }, [exportPng, exportSvg, exportPngRef, exportSvgRef]);
+
+  const buildGraph = useCallback(() => {
     const svgEl = svgRef.current;
     const container = containerRef.current;
     if (!svgEl || !container) return;
@@ -177,7 +235,6 @@ export function ForceGraph({
     const width = container.clientWidth;
     const height = container.clientHeight;
     viewportRef.current = { width, height };
-
     svg.attr('width', width).attr('height', height);
 
     const defs = svg.append('defs');
@@ -215,55 +272,39 @@ export function ForceGraph({
       .on('zoom', (event) => {
         transformRef.current = event.transform;
         g.attr('transform', event.transform);
-        updateMinimap();
       });
-
     svg.call(zoom);
     svg.on('dblclick.zoom', null);
     zoomRef.current = zoom;
 
     const simulation = d3.forceSimulation<GraphNode>([])
-      .force('link', d3.forceLink<GraphNode, GraphLink>().id((d) => d.id).distance(80).strength(0.1))
-      .force('charge', d3.forceManyBody().strength(-200))
+      .force('link', d3.forceLink<GraphNode, GraphLink>().id((d) => d.id).distance(FORCE_LINK_DISTANCE).strength(0.1))
+      .force('charge', d3.forceManyBody().strength(FORCE_CHARGE_STRENGTH))
       .force('center', d3.forceCenter(width / 2, height / 2))
-      .force('collision', d3.forceCollide().radius((d) => getNodeRadius(d as GraphNode) + 5))
+      .force('collision', d3.forceCollide().radius((d) => getNodeRadius((d as GraphNode).frequency) + 5))
       .force('x', d3.forceX(width / 2).strength(0.03))
       .force('y', d3.forceY(height / 2).strength(0.03))
       .on('tick', () => {
-        g.select('.links').selectAll('line')
-          .attr('x1', (d: unknown) => (d as GraphLink).source instanceof Object ? ((d as GraphLink).source as GraphNode).x! : 0)
-          .attr('y1', (d: unknown) => (d as GraphLink).source instanceof Object ? ((d as GraphLink).source as GraphNode).y! : 0)
-          .attr('x2', (d: unknown) => (d as GraphLink).target instanceof Object ? ((d as GraphLink).target as GraphNode).x! : 0)
-          .attr('y2', (d: unknown) => (d as GraphLink).target instanceof Object ? ((d as GraphLink).target as GraphNode).y! : 0);
-
-        g.select('.link-labels').selectAll('text')
-          .attr('x', (d: unknown) => {
-            const link = d as GraphLink;
-            const sx = link.source instanceof Object ? (link.source as GraphNode).x! : 0;
-            const tx = link.target instanceof Object ? (link.target as GraphNode).x! : 0;
-            return (sx + tx) / 2;
-          })
-          .attr('y', (d: unknown) => {
-            const link = d as GraphLink;
-            const sy = link.source instanceof Object ? (link.source as GraphNode).y! : 0;
-            const ty = link.target instanceof Object ? (link.target as GraphNode).y! : 0;
-            return (sy + ty) / 2;
-          });
-
-        g.select('.nodes').selectAll('circle')
-          .attr('cx', (d: unknown) => (d as GraphNode).x!)
-          .attr('cy', (d: unknown) => (d as GraphNode).y!);
-
-        g.select('.labels').selectAll('text')
-          .attr('x', (d: unknown) => (d as GraphNode).x!)
-          .attr('y', (d: unknown) => (d as GraphNode).y!);
+        g.select('.links').selectAll<SVGLineElement, GraphLink>('line')
+          .attr('x1', (d) => (d.source as GraphNode).x!)
+          .attr('y1', (d) => (d.source as GraphNode).y!)
+          .attr('x2', (d) => (d.target as GraphNode).x!)
+          .attr('y2', (d) => (d.target as GraphNode).y!);
+        g.select('.link-labels').selectAll<SVGTextElement, GraphLink>('text')
+          .attr('x', (d) => ((d.source as GraphNode).x! + (d.target as GraphNode).x!) / 2)
+          .attr('y', (d) => ((d.source as GraphNode).y! + (d.target as GraphNode).y!) / 2);
+        g.select('.nodes').selectAll<SVGCircleElement, GraphNode>('circle')
+          .attr('cx', (d) => d.x!)
+          .attr('cy', (d) => d.y!);
+        g.select('.labels').selectAll<SVGTextElement, GraphNode>('text')
+          .attr('x', (d) => d.x!)
+          .attr('y', (d) => d.y!);
       });
-
     simulationRef.current = simulation;
 
-    let tooltip = d3.select(container).select('.kg-tooltip');
-    if (tooltip.empty()) {
-      tooltip = d3.select(container)
+    const existingTooltip = d3.select(container).select('.kg-tooltip');
+    if (existingTooltip.empty()) {
+      d3.select(container)
         .append('div')
         .attr('class', 'kg-tooltip')
         .style('position', 'absolute')
@@ -293,72 +334,29 @@ export function ForceGraph({
     });
     resizeObserver.observe(container);
 
-    exportPngRef.current = () => {
-      const el = svgRef.current;
-      if (!el) return;
-      const svgData = new XMLSerializer().serializeToString(el);
-      const canvas = document.createElement('canvas');
-      const scale = 2;
-      canvas.width = el.clientWidth * scale;
-      canvas.height = el.clientHeight * scale;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-      ctx.scale(scale, scale);
-      const img = new Image();
-      img.onload = () => {
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(img, 0, 0);
-        const a = document.createElement('a');
-        a.download = 'knowledge-graph.png';
-        a.href = canvas.toDataURL('image/png');
-        a.click();
-      };
-      img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgData)));
-    };
-
-    exportSvgRef.current = () => {
-      const el = svgRef.current;
-      if (!el) return;
-      const svgData = new XMLSerializer().serializeToString(el);
-      const blob = new Blob([svgData], { type: 'image/svg+xml' });
-      const a = document.createElement('a');
-      a.download = 'knowledge-graph.svg';
-      a.href = URL.createObjectURL(blob);
-      a.click();
-      URL.revokeObjectURL(a.href);
-    };
-
     return () => {
       resizeObserver.disconnect();
       simulation.stop();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    const cleanup = initGraph();
+    const cleanup = buildGraph();
     return () => {
       cleanup?.();
       simulationRef.current?.stop();
       gRef.current = null;
       zoomRef.current = null;
     };
-  }, [initGraph]);
+  }, [buildGraph]);
 
   useEffect(() => {
     const simulation = simulationRef.current;
     const g = gRef.current;
-    if (!simulation || !g || sortedEntities.length === 0) return;
-
-    const currentNodes = sortedEntities.slice(0, effectiveCount);
-    const currentEntityIds = new Set(currentNodes.map((e) => e.id));
-    const currentLinks = filteredRelations.filter(
-      (r) => currentEntityIds.has(r.sourceId) && currentEntityIds.has(r.targetId)
-    );
+    if (!simulation || !g) return;
 
     const existingNodeMap = new Map(nodesRef.current.map((n) => [n.id, n]));
-    const newNodes: GraphNode[] = currentNodes.map((e) => {
+    const newNodes: GraphNode[] = visibleEntities.map((e) => {
       const existing = existingNodeMap.get(e.id);
       if (existing) {
         existing.name = e.name;
@@ -383,7 +381,7 @@ export function ForceGraph({
     });
 
     const existingLinkMap = new Map(linksRef.current.map((l) => [l.id, l]));
-    const newLinks: GraphLink[] = currentLinks.map((r) => {
+    const newLinks: GraphLink[] = visibleRelations.map((r) => {
       const existing = existingLinkMap.get(r.id);
       if (existing) return existing;
       return {
@@ -398,88 +396,78 @@ export function ForceGraph({
 
     nodesRef.current = newNodes;
     linksRef.current = newLinks;
-
     simulation.nodes(newNodes);
     (simulation.force('link') as d3.ForceLink<GraphNode, GraphLink>).links(newLinks);
-    simulation.alpha(0.4).restart();
+    simulation.alpha(0.35).restart();
 
-    const linkElements = g.select('.links')
-      .selectAll('line')
-      .data(newLinks, (d: unknown) => (d as GraphLink).id);
-
-    linkElements.exit().remove();
-
-    const linkEnter = linkElements.enter()
+    const linkSel = g.select('.links')
+      .selectAll<SVGLineElement, GraphLink>('line')
+      .data(newLinks, (d) => d.id);
+    linkSel.exit().remove();
+    const linkEnter = linkSel.enter()
       .append('line')
-      .attr('stroke', (d: unknown) => RELATION_COLORS[(d as GraphLink).relationType])
-      .attr('stroke-width', (d: unknown) => Math.max(1, (d as GraphLink).weight))
+      .attr('stroke', (d) => RELATION_COLORS[d.relationType])
+      .attr('stroke-width', (d) => Math.max(1, d.weight))
       .attr('stroke-opacity', 0.4)
-      .attr('marker-end', (d: unknown) => {
-        const rt = (d as GraphLink).relationType;
-        return rt === 'citation' || rt === 'dependency' ? `url(#arrow-${rt})` : null;
-      });
-
-    const allLinks = linkEnter.merge(
-      linkElements as d3.Selection<SVGLineElement, GraphLink, SVGGElement, unknown>
-    );
-
-    allLinks.attr('stroke', (d: unknown) => RELATION_COLORS[(d as GraphLink).relationType])
-      .attr('stroke-width', (d: unknown) => Math.max(1, (d as GraphLink).weight));
-
-    const linkLabelElements = g.select('.link-labels')
-      .selectAll('text')
-      .data(
-        newLinks.filter((l) => l.relationType !== 'cooccurrence'),
-        (d: unknown) => (d as GraphLink).id
+      .attr('marker-end', (d) =>
+        d.relationType === 'citation' || d.relationType === 'dependency'
+          ? `url(#arrow-${d.relationType})`
+          : null
       );
+    const allLinks = linkEnter.merge(linkSel);
+    allLinks
+      .attr('stroke', (d) => RELATION_COLORS[d.relationType])
+      .attr('stroke-width', (d) => Math.max(1, d.weight));
 
-    linkLabelElements.exit().remove();
-
-    linkLabelElements.enter()
+    const linkLabelSel = g.select('.link-labels')
+      .selectAll<SVGTextElement, GraphLink>('text')
+      .data(newLinks.filter((l) => l.relationType !== 'cooccurrence'), (d) => d.id);
+    linkLabelSel.exit().remove();
+    linkLabelSel.enter()
       .append('text')
-      .text((d: unknown) => RELATION_LABELS[(d as GraphLink).relationType])
+      .text((d) => RELATION_LABELS[d.relationType])
       .attr('font-size', 8)
-      .attr('fill', (d: unknown) => RELATION_COLORS[(d as GraphLink).relationType])
+      .attr('fill', (d) => RELATION_COLORS[d.relationType])
       .attr('text-anchor', 'middle')
       .attr('dy', -6)
       .attr('pointer-events', 'none')
       .style('user-select', 'none')
       .attr('opacity', 0.7);
 
-    const nodeElements = g.select('.nodes')
-      .selectAll('circle')
-      .data(newNodes, (d: unknown) => (d as GraphNode).id);
-
-    nodeElements.exit().remove();
-
-    const nodeEnter = nodeElements.enter()
-      .append('circle')
-      .attr('r', (d: unknown) => getNodeRadius(d as GraphNode))
-      .attr('fill', (d: unknown) => ENTITY_COLORS[(d as GraphNode).type])
-      .attr('stroke', '#fff')
-      .attr('stroke-width', 2)
-      .attr('cursor', 'pointer')
-      .call(d3.drag<SVGCircleElement, GraphNode>()
-        .on('start', (event, d) => {
-          if (!event.active) simulation.alphaTarget(0.3).restart();
-          d.fx = d.x;
-          d.fy = d.y;
-        })
-        .on('drag', (event, d) => {
-          d.fx = event.x;
-          d.fy = event.y;
-        })
-        .on('end', (event, d) => {
-          if (!event.active) simulation.alphaTarget(0);
-          d.fx = null;
-          d.fy = null;
-        })
-      );
+    const nodeSel = g.select('.nodes')
+      .selectAll<SVGCircleElement, GraphNode>('circle')
+      .data(newNodes, (d) => d.id);
+    nodeSel.exit().remove();
 
     const tooltip = d3.select(containerRef.current!).select('.kg-tooltip');
 
+    const dragBehavior = d3.drag<SVGCircleElement, GraphNode>()
+      .on('start', (event, d) => {
+        if (!event.active) simulation.alphaTarget(0.3).restart();
+        d.fx = d.x;
+        d.fy = d.y;
+      })
+      .on('drag', (event, d) => {
+        d.fx = event.x;
+        d.fy = event.y;
+      })
+      .on('end', (event, d) => {
+        if (!event.active) simulation.alphaTarget(0);
+        d.fx = null;
+        d.fy = null;
+      });
+
+    const nodeEnter = nodeSel.enter()
+      .append('circle')
+      .attr('r', (d) => getNodeRadius(d.frequency))
+      .attr('fill', (d) => ENTITY_COLORS[d.type])
+      .attr('stroke', '#fff')
+      .attr('stroke-width', 2)
+      .attr('cursor', 'pointer')
+      .call(dragBehavior);
+
     nodeEnter
-      .on('mouseover', (event: MouseEvent, d: GraphNode) => {
+      .on('mouseover', (_event, d) => {
         onEntityHover(d.id);
         if (!tooltip.empty()) {
           tooltip
@@ -494,9 +482,9 @@ export function ForceGraph({
             `);
         }
       })
-      .on('mousemove', (event: MouseEvent) => {
-        if (!tooltip.empty()) {
-          const rect = containerRef.current!.getBoundingClientRect();
+      .on('mousemove', (event) => {
+        if (!tooltip.empty() && containerRef.current) {
+          const rect = containerRef.current.getBoundingClientRect();
           let left = event.clientX - rect.left + 14;
           let top = event.clientY - rect.top - 14;
           if (left + 300 > rect.width) left = event.clientX - rect.left - 310;
@@ -508,7 +496,7 @@ export function ForceGraph({
         onEntityHover(null);
         if (!tooltip.empty()) tooltip.style('opacity', 0);
       })
-      .on('click', (_event: MouseEvent, d: GraphNode) => {
+      .on('click', (_event, d) => {
         const now = Date.now();
         const last = lastClickRef.current;
         if (last.id === d.id && now - last.time < 350) {
@@ -520,282 +508,153 @@ export function ForceGraph({
         }
       });
 
-    const allNodes = nodeEnter.merge(
-      nodeElements as d3.Selection<SVGCircleElement, GraphNode, SVGGElement, unknown>
-    );
+    nodeEnter.merge(nodeSel)
+      .attr('r', (d) => getNodeRadius(d.frequency))
+      .attr('fill', (d) => ENTITY_COLORS[d.type]);
 
-    allNodes
-      .attr('r', (d: unknown) => getNodeRadius(d as GraphNode))
-      .attr('fill', (d: unknown) => ENTITY_COLORS[(d as GraphNode).type]);
-
-    const labelElements = g.select('.labels')
-      .selectAll('text')
-      .data(newNodes, (d: unknown) => (d as GraphNode).id);
-
-    labelElements.exit().remove();
-
-    labelElements.enter()
+    const labelSel = g.select('.labels')
+      .selectAll<SVGTextElement, GraphNode>('text')
+      .data(newNodes, (d) => d.id);
+    labelSel.exit().remove();
+    labelSel.enter()
       .append('text')
-      .text((d: unknown) => {
-        const name = (d as GraphNode).name;
-        return name.length > 6 ? name.slice(0, 6) + '…' : name;
-      })
+      .text((d) => (d.name.length > 6 ? d.name.slice(0, 6) + '…' : d.name))
       .attr('font-size', 10)
       .attr('fill', '#334155')
       .attr('text-anchor', 'middle')
-      .attr('dy', (d: unknown) => getNodeRadius(d as GraphNode) + 14)
+      .attr('dy', (d) => getNodeRadius(d.frequency) + 14)
       .attr('pointer-events', 'none')
       .style('user-select', 'none');
-  }, [sortedEntities, filteredRelations, effectiveCount, onEntityClick, onEntityDoubleClick, onEntityHover]);
+  }, [visibleEntities, visibleRelations, onEntityClick, onEntityDoubleClick, onEntityHover]);
 
   useEffect(() => {
     const g = gRef.current;
     if (!g) return;
-
     const activeId = selectedEntityId || hoveredEntityId;
 
-    const nodeElements = g.select('.nodes').selectAll('circle');
-    const linkElements = g.select('.links').selectAll('line');
-    const labelElements = g.select('.labels').selectAll('text');
-    const linkLabelElements = g.select('.link-labels').selectAll('text');
+    const nodeSel = g.select('.nodes').selectAll<SVGCircleElement, GraphNode>('circle');
+    const linkSel = g.select('.links').selectAll<SVGLineElement, GraphLink>('line');
+    const labelSel = g.select('.labels').selectAll<SVGTextElement, GraphNode>('text');
+    const linkLabelSel = g.select('.link-labels').selectAll<SVGTextElement, GraphLink>('text');
 
     if (activeId) {
-      const connected = new Set<string>();
-      connected.add(activeId);
-
-      linksRef.current.forEach((link) => {
-        const s = typeof link.source === 'string' ? link.source : (link.source as GraphNode).id;
-        const t = typeof link.target === 'string' ? link.target : (link.target as GraphNode).id;
+      const connected = new Set<string>([activeId]);
+      for (const link of linksRef.current) {
+        const s = (link.source as GraphNode).id;
+        const t = (link.target as GraphNode).id;
         if (s === activeId || t === activeId) {
           connected.add(s);
           connected.add(t);
         }
-      });
-
-      nodeElements
-        .transition().duration(200)
-        .attr('opacity', (d: unknown) => connected.has((d as GraphNode).id) ? 1 : 0.12)
-        .attr('stroke-width', (d: unknown) => (d as GraphNode).id === activeId ? 4 : 2)
-        .attr('stroke', (d: unknown) => (d as GraphNode).id === activeId ? '#fbbf24' : '#fff')
-        .attr('filter', (d: unknown) => (d as GraphNode).id === activeId ? 'url(#glow)' : null);
-
-      linkElements
-        .transition().duration(200)
-        .attr('stroke-opacity', (d: unknown) => {
-          const link = d as GraphLink;
-          const s = typeof link.source === 'string' ? link.source : (link.source as GraphNode).id;
-          const t = typeof link.target === 'string' ? link.target : (link.target as GraphNode).id;
-          return (s === activeId || t === activeId) ? 0.8 : 0.04;
+      }
+      nodeSel.transition().duration(200)
+        .attr('opacity', (d) => connected.has(d.id) ? 1 : 0.12)
+        .attr('stroke-width', (d) => (d.id === activeId ? 4 : 2))
+        .attr('stroke', (d) => (d.id === activeId ? '#fbbf24' : '#fff'))
+        .attr('filter', (d) => (d.id === activeId ? 'url(#glow)' : null));
+      linkSel.transition().duration(200)
+        .attr('stroke-opacity', (d) => {
+          const s = (d.source as GraphNode).id;
+          const t = (d.target as GraphNode).id;
+          return s === activeId || t === activeId ? 0.8 : 0.04;
         })
-        .attr('stroke-width', (d: unknown) => {
-          const link = d as GraphLink;
-          const s = typeof link.source === 'string' ? link.source : (link.source as GraphNode).id;
-          const t = typeof link.target === 'string' ? link.target : (link.target as GraphNode).id;
-          return (s === activeId || t === activeId) ? Math.max(2.5, link.weight * 1.5) : Math.max(0.5, link.weight * 0.5);
+        .attr('stroke-width', (d) => {
+          const s = (d.source as GraphNode).id;
+          const t = (d.target as GraphNode).id;
+          return s === activeId || t === activeId
+            ? Math.max(2.5, d.weight * 1.5)
+            : Math.max(0.5, d.weight * 0.5);
         });
-
-      labelElements
-        .transition().duration(200)
-        .attr('opacity', (d: unknown) => connected.has((d as GraphNode).id) ? 1 : 0.08);
-
-      linkLabelElements
-        .transition().duration(200)
-        .attr('opacity', (d: unknown) => {
-          const link = d as GraphLink;
-          const s = typeof link.source === 'string' ? link.source : (link.source as GraphNode).id;
-          const t = typeof link.target === 'string' ? link.target : (link.target as GraphNode).id;
-          return (s === activeId || t === activeId) ? 0.9 : 0.05;
+      labelSel.transition().duration(200)
+        .attr('opacity', (d) => connected.has(d.id) ? 1 : 0.08);
+      linkLabelSel.transition().duration(200)
+        .attr('opacity', (d) => {
+          const s = (d.source as GraphNode).id;
+          const t = (d.target as GraphNode).id;
+          return s === activeId || t === activeId ? 0.9 : 0.05;
         });
     } else {
-      nodeElements
-        .transition().duration(200)
-        .attr('opacity', (d: unknown) => {
-          if (searchMatchIds.size > 0) {
-            return searchMatchIds.has((d as GraphNode).id) ? 1 : 0.25;
-          }
-          return 1;
-        })
+      nodeSel.transition().duration(200)
+        .attr('opacity', (d) => searchMatchIds.size > 0 ? (searchMatchIds.has(d.id) ? 1 : 0.25) : 1)
         .attr('stroke-width', 2)
         .attr('stroke', '#fff')
         .attr('filter', null);
-
-      linkElements
-        .transition().duration(200)
+      linkSel.transition().duration(200)
         .attr('stroke-opacity', searchMatchIds.size > 0 ? 0.15 : 0.4)
-        .attr('stroke-width', (d: unknown) => Math.max(1, (d as GraphLink).weight));
-
-      labelElements
-        .transition().duration(200)
-        .attr('opacity', (d: unknown) => {
-          if (searchMatchIds.size > 0) {
-            return searchMatchIds.has((d as GraphNode).id) ? 1 : 0.15;
-          }
-          return 1;
-        });
-
-      linkLabelElements
-        .transition().duration(200)
+        .attr('stroke-width', (d) => Math.max(1, d.weight));
+      labelSel.transition().duration(200)
+        .attr('opacity', (d) => searchMatchIds.size > 0 ? (searchMatchIds.has(d.id) ? 1 : 0.15) : 1);
+      linkLabelSel.transition().duration(200)
         .attr('opacity', searchMatchIds.size > 0 ? 0.1 : 0.7);
     }
   }, [selectedEntityId, hoveredEntityId, searchMatchIds]);
 
-  const updateMinimap = useCallback(() => {
-    const minimapEl = minimapSvgRef.current;
-    const nodes = nodesRef.current;
-    if (!minimapEl || nodes.length === 0) return;
+  useEffect(() => {
+    if (!searchMatchIds.size) return;
+    const svgEl = svgRef.current;
+    const zoom = zoomRef.current;
+    if (!svgEl || !zoom) return;
 
-    const svg = d3.select(minimapEl);
-    const mw = 160;
-    const mh = 100;
-
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    for (const n of nodes) {
-      if (n.x !== undefined && n.y !== undefined) {
-        minX = Math.min(minX, n.x);
-        maxX = Math.max(maxX, n.x);
-        minY = Math.min(minY, n.y);
-        maxY = Math.max(maxY, n.y);
+    const attempt = (retriesRemaining: number) => {
+      const target = nodesRef.current.find((n) => searchMatchIds.has(n.id));
+      if (!target || target.x === undefined || target.y === undefined) {
+        if (retriesRemaining > 0) {
+          setTimeout(() => attempt(retriesRemaining - 1), 60);
+        }
+        return;
       }
-    }
-
-    if (!isFinite(minX)) return;
-
-    const pad = 50;
-    minX -= pad; maxX += pad; minY -= pad; maxY += pad;
-    const rangeX = maxX - minX || 1;
-    const rangeY = maxY - minY || 1;
-    const scale = Math.min(mw / rangeX, mh / rangeY);
-
-    const dotData = nodes.map((n) => ({
-      id: n.id,
-      type: n.type,
-      x: (n.x! - minX) * scale,
-      y: (n.y! - minY) * scale,
-    }));
-
-    svg.attr('width', mw).attr('height', mh);
-    svg.select('.minimap-dots').attr('transform', `translate(${(mw - rangeX * scale) / 2}, ${(mh - rangeY * scale) / 2})`);
-
-    const dots = svg.select('.minimap-dots').selectAll('circle')
-      .data(dotData, (d: unknown) => (d as { id: string }).id);
-
-    dots.exit().remove();
-
-    dots.enter()
-      .append('circle')
-      .attr('r', 1.5)
-      .attr('fill', (d: unknown) => ENTITY_COLORS[(d as { type: EntityType }).type])
-      .attr('opacity', 0.6)
-      .each(function (d: unknown) {
-        const data = d as { x: number; y: number };
-        d3.select(this).attr('cx', data.x).attr('cy', data.y);
-      });
-
-    dots.attr('cx', (d: unknown) => (d as { x: number }).x)
-      .attr('cy', (d: unknown) => (d as { y: number }).y);
-
-    const t = transformRef.current;
-    const vp = viewportRef.current;
-    if (t && vp.width > 0) {
-      const invK = 1 / t.k;
-      const vx1 = (-t.x) * invK;
-      const vy1 = (-t.y) * invK;
-      const vx2 = (-t.x + vp.width) * invK;
-      const vy2 = (-t.y + vp.height) * invK;
-
-      const rvx1 = (vx1 - minX) * scale + (mw - rangeX * scale) / 2;
-      const rvy1 = (vy1 - minY) * scale + (mh - rangeY * scale) / 2;
-      const rvx2 = (vx2 - minX) * scale + (mw - rangeX * scale) / 2;
-      const rvy2 = (vy2 - minY) * scale + (mh - rangeY * scale) / 2;
-
-      svg.select('.minimap-viewport')
-        .attr('x', rvx1)
-        .attr('y', rvy1)
-        .attr('width', rvx2 - rvx1)
-        .attr('height', rvy2 - rvy1);
-    }
-  }, []);
-
-  useEffect(() => {
-    const minimapEl = minimapSvgRef.current;
-    if (!minimapEl) return;
-
-    const svg = d3.select(minimapEl);
-    svg.selectAll('*').remove();
-    svg.append('g').attr('class', 'minimap-dots');
-    svg.append('rect')
-      .attr('class', 'minimap-viewport')
-      .attr('fill', 'rgba(59, 130, 246, 0.1)')
-      .attr('stroke', '#3b82f6')
-      .attr('stroke-width', 1)
-      .attr('rx', 2);
-  }, []);
-
-  useEffect(() => {
-    const interval = setInterval(updateMinimap, 500);
-    return () => clearInterval(interval);
-  }, [updateMinimap]);
-
-  useEffect(() => {
-    if (!searchMatchIds.size || !zoomRef.current || !svgRef.current || !containerRef.current) return;
-    const matchNode = nodesRef.current.find((n) => searchMatchIds.has(n.id));
-    if (!matchNode || matchNode.x === undefined || matchNode.y === undefined) return;
-
-    const vp = viewportRef.current;
-    const targetK = 1.2;
-    const targetX = vp.width / 2 - matchNode.x * targetK;
-    const targetY = vp.height / 2 - matchNode.y * targetK;
-
-    d3.select(svgRef.current).transition().duration(600)
-      .call(
-        zoomRef.current.transform,
-        d3.zoomIdentity.translate(targetX, targetY).scale(targetK)
-      );
+      const vp = viewportRef.current;
+      if (vp.width <= 0) {
+        setTimeout(() => attempt(retriesRemaining - 1), 60);
+        return;
+      }
+      const targetK = 1.2;
+      const targetX = vp.width / 2 - target.x * targetK;
+      const targetY = vp.height / 2 - target.y * targetK;
+      d3.select(svgEl).transition().duration(750).ease(d3.easeCubicOut)
+        .call(zoom.transform, d3.zoomIdentity.translate(targetX, targetY).scale(targetK));
+    };
+    attempt(20);
   }, [searchMatchIds]);
+
+  const getMinimapNodes = () =>
+    nodesRef.current
+      .filter((n) => n.x !== undefined && n.y !== undefined)
+      .map((n) => ({ id: n.id, type: n.type, x: n.x!, y: n.y! }));
+
+  const getViewport = () => {
+    const vp = viewportRef.current;
+    if (vp.width <= 0) return null;
+    return { x: transformRef.current.x, y: transformRef.current.y, k: transformRef.current.k, vpWidth: vp.width, vpHeight: vp.height };
+  };
 
   return (
     <div ref={containerRef} className="relative h-full w-full overflow-hidden bg-slate-50">
       <svg ref={svgRef} className="h-full w-full" />
+
       {isLoadingIncremental && (
-        <div className="absolute top-4 left-1/2 -translate-x-1/2 rounded-full bg-white/90 px-4 py-2 text-xs text-slate-600 shadow-lg backdrop-blur-sm">
+        <div className="pointer-events-none absolute top-4 left-1/2 -translate-x-1/2 rounded-full bg-white/90 px-4 py-2 text-xs text-slate-600 shadow-lg backdrop-blur-sm">
           正在加载节点… {loadingProgress}% ({effectiveCount}/{sortedEntities.length})
         </div>
       )}
-      {useVirtualization && (
-        <div className="absolute top-4 right-4 rounded-full bg-slate-100/80 px-3 py-1 text-[10px] text-slate-500 backdrop-blur-sm">
-          虚拟化模式 · {effectiveCount} 个节点
+
+      {exportPhase && (
+        <div className="pointer-events-none absolute top-4 left-1/2 -translate-x-1/2 animate-pulse rounded-full bg-[#1e3a5f] px-4 py-2 text-xs font-medium text-white shadow-lg">
+          {exportPhase}
         </div>
       )}
-      <div className="absolute bottom-4 left-4 flex flex-col gap-1.5">
-        {(['person', 'location', 'organization', 'term'] as EntityType[]).map((type) => (
-          <div key={type} className="flex items-center gap-1.5 text-xs text-slate-600">
-            <span
-              className="inline-block h-2.5 w-2.5 rounded-full"
-              style={{ backgroundColor: ENTITY_COLORS[type] }}
-            />
-            {ENTITY_LABELS[type]}
-          </div>
-        ))}
-      </div>
-      <div className="absolute bottom-4 right-4 flex flex-col gap-1.5">
-        {(['citation', 'dependency', 'comparison', 'cooccurrence'] as RelationType[]).map((type) => (
-          <div key={type} className="flex items-center gap-1.5 text-xs text-slate-600">
-            <span
-              className="inline-block h-0.5 w-4"
-              style={{ backgroundColor: RELATION_COLORS[type] }}
-            />
-            {RELATION_LABELS[type]}
-          </div>
-        ))}
-      </div>
-      <div className="absolute bottom-16 left-4 rounded-lg border border-slate-200 bg-white/90 p-2 shadow-sm backdrop-blur-sm">
-        <div className="mb-1 text-[9px] font-medium text-slate-500">导航</div>
-        <svg ref={minimapSvgRef} className="block" />
+
+      {useVirtualization && !forceRenderAllRef.current && (
+        <div className="pointer-events-none absolute top-4 right-4 rounded-full bg-slate-100/80 px-3 py-1 text-[10px] text-slate-500 backdrop-blur-sm">
+          虚拟化 · {visibleEntities.length} 个节点
+        </div>
+      )}
+
+      <GraphLegend />
+
+      <div className="absolute bottom-16 left-4">
+        <GraphMinimap getNodes={getMinimapNodes} getViewport={getViewport} />
       </div>
     </div>
   );
-}
-
-function getNodeRadius(node: GraphNode): number {
-  return Math.max(6, Math.min(20, 4 + Math.sqrt(node.frequency) * 3));
 }

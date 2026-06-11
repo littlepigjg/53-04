@@ -1,30 +1,7 @@
 import { create } from 'zustand';
-import type { KnowledgeGraph, EntityStats, EntityType, RelationType, SentimentType } from '../types';
+import type { KnowledgeGraph, EntityStats, EntityType } from '../types';
 import { knowledgeGraphApi } from '../utils/api';
-
-function computeStatsLocally(graph: KnowledgeGraph): EntityStats {
-  const byType: Record<EntityType, number> = { person: 0, location: 0, organization: 0, term: 0 };
-  for (const e of graph.entities) byType[e.type]++;
-
-  const byRelationType: Record<RelationType, number> = { citation: 0, dependency: 0, comparison: 0, cooccurrence: 0 };
-  for (const r of graph.relations) byRelationType[r.type]++;
-
-  const entityRelationCount = new Map<string, number>();
-  for (const r of graph.relations) {
-    entityRelationCount.set(r.sourceId, (entityRelationCount.get(r.sourceId) || 0) + 1);
-    entityRelationCount.set(r.targetId, (entityRelationCount.get(r.targetId) || 0) + 1);
-  }
-
-  const topEntities = graph.entities
-    .map((entity) => ({ entity, relationCount: entityRelationCount.get(entity.id) || 0 }))
-    .sort((a, b) => b.relationCount - a.relationCount)
-    .slice(0, 20);
-
-  const sentimentDistribution: Record<SentimentType, number> = { positive: 0, neutral: 0, negative: 0 };
-  for (const e of graph.entities) sentimentDistribution[e.sentiment]++;
-
-  return { totalEntities: graph.entities.length, totalRelations: graph.relations.length, byType, byRelationType, topEntities, sentimentDistribution };
-}
+import { computeStatsLocally } from '../utils/graphUtils';
 
 interface KnowledgeGraphState {
   graph: KnowledgeGraph | null;
@@ -32,6 +9,7 @@ interface KnowledgeGraphState {
   selectedEntityId: string | null;
   hoveredEntityId: string | null;
   expandedEntityIds: Set<string>;
+  pinnedEntityIds: Set<string>;
   highlightParagraphIds: string[];
   entityTypeFilter: EntityType[];
   searchQuery: string;
@@ -43,6 +21,7 @@ interface KnowledgeGraphState {
   selectEntity: (entityId: string | null) => void;
   hoverEntity: (entityId: string | null) => void;
   expandEntity: (entityId: string) => Promise<void>;
+  addPinnedEntities: (ids: string[]) => void;
   setEntityTypeFilter: (types: EntityType[]) => void;
   setSearchQuery: (query: string) => void;
   reset: () => void;
@@ -54,6 +33,7 @@ export const useKnowledgeGraphStore = create<KnowledgeGraphState>((set, get) => 
   selectedEntityId: null,
   hoveredEntityId: null,
   expandedEntityIds: new Set<string>(),
+  pinnedEntityIds: new Set<string>(),
   highlightParagraphIds: [],
   entityTypeFilter: ['person', 'location', 'organization', 'term'],
   searchQuery: '',
@@ -62,7 +42,7 @@ export const useKnowledgeGraphStore = create<KnowledgeGraphState>((set, get) => 
 
   loadForDocument: async (docId: string) => {
     try {
-      set({ loading: true, error: null });
+      set({ loading: true, error: null, pinnedEntityIds: new Set() });
       const [graph, stats] = await Promise.all([
         knowledgeGraphApi.forDocument(docId),
         knowledgeGraphApi.statsForDocument(docId),
@@ -75,7 +55,7 @@ export const useKnowledgeGraphStore = create<KnowledgeGraphState>((set, get) => 
 
   loadForAll: async () => {
     try {
-      set({ loading: true, error: null });
+      set({ loading: true, error: null, pinnedEntityIds: new Set() });
       const [graph, stats] = await Promise.all([
         knowledgeGraphApi.forAll(),
         knowledgeGraphApi.statsForAll(),
@@ -94,9 +74,19 @@ export const useKnowledgeGraphStore = create<KnowledgeGraphState>((set, get) => 
     }
     const entity = graph.entities.find((e) => e.id === entityId);
     if (entity) {
-      set({
-        selectedEntityId: entityId,
-        highlightParagraphIds: entity.paragraphIds,
+      const neighborIds = new Set<string>([entityId]);
+      for (const r of graph.relations) {
+        if (r.sourceId === entityId) neighborIds.add(r.targetId);
+        else if (r.targetId === entityId) neighborIds.add(r.sourceId);
+      }
+      set((s) => {
+        const merged = new Set(s.pinnedEntityIds);
+        neighborIds.forEach((id) => merged.add(id));
+        return {
+          selectedEntityId: entityId,
+          highlightParagraphIds: entity.paragraphIds,
+          pinnedEntityIds: merged,
+        };
       });
     }
   },
@@ -114,12 +104,8 @@ export const useKnowledgeGraphStore = create<KnowledgeGraphState>((set, get) => 
       const existingEntityIds = new Set(graph.entities.map((e) => e.id));
       const existingRelationIds = new Set(graph.relations.map((r) => r.id));
 
-      const newEntities = expanded.entities.filter(
-        (e) => !existingEntityIds.has(e.id)
-      );
-      const newRelations = expanded.relations.filter(
-        (r) => !existingRelationIds.has(r.id)
-      );
+      const newEntities = expanded.entities.filter((e) => !existingEntityIds.has(e.id));
+      const newRelations = expanded.relations.filter((r) => !existingRelationIds.has(r.id));
 
       const newExpanded = new Set(expandedEntityIds);
       newExpanded.add(entityId);
@@ -131,10 +117,22 @@ export const useKnowledgeGraphStore = create<KnowledgeGraphState>((set, get) => 
 
       const newStats = computeStatsLocally(newGraph);
 
-      set({
-        graph: newGraph,
-        stats: newStats,
-        expandedEntityIds: newExpanded,
+      const forceIds = new Set<string>([entityId]);
+      newEntities.forEach((e) => forceIds.add(e.id));
+      expanded.relations.forEach((r) => {
+        forceIds.add(r.sourceId);
+        forceIds.add(r.targetId);
+      });
+
+      set((s) => {
+        const mergedPinned = new Set(s.pinnedEntityIds);
+        forceIds.forEach((id) => mergedPinned.add(id));
+        return {
+          graph: newGraph,
+          stats: newStats,
+          expandedEntityIds: newExpanded,
+          pinnedEntityIds: mergedPinned,
+        };
       });
     } catch {
       const newExpanded = new Set(expandedEntityIds);
@@ -143,12 +141,34 @@ export const useKnowledgeGraphStore = create<KnowledgeGraphState>((set, get) => 
     }
   },
 
+  addPinnedEntities: (ids: string[]) => {
+    if (ids.length === 0) return;
+    set((s) => {
+      const merged = new Set(s.pinnedEntityIds);
+      ids.forEach((id) => merged.add(id));
+      if (merged.size === s.pinnedEntityIds.size) return s;
+      return { pinnedEntityIds: merged };
+    });
+  },
+
   setEntityTypeFilter: (types: EntityType[]) => {
     set({ entityTypeFilter: types });
   },
 
   setSearchQuery: (query: string) => {
     set({ searchQuery: query });
+    if (!query.trim()) return;
+    const { graph } = get();
+    if (!graph) return;
+    const q = query.toLowerCase();
+    const matches = graph.entities.filter((e) => e.name.toLowerCase().includes(q));
+    if (matches.length > 0) {
+      set((s) => {
+        const merged = new Set(s.pinnedEntityIds);
+        matches.forEach((e) => merged.add(e.id));
+        return { pinnedEntityIds: merged };
+      });
+    }
   },
 
   reset: () => {
@@ -158,6 +178,7 @@ export const useKnowledgeGraphStore = create<KnowledgeGraphState>((set, get) => 
       selectedEntityId: null,
       hoveredEntityId: null,
       expandedEntityIds: new Set(),
+      pinnedEntityIds: new Set(),
       highlightParagraphIds: [],
       entityTypeFilter: ['person', 'location', 'organization', 'term'],
       searchQuery: '',

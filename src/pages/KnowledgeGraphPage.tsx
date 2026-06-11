@@ -31,6 +31,7 @@ export function KnowledgeGraphPage() {
     selectedEntityId,
     hoveredEntityId,
     entityTypeFilter,
+    pinnedEntityIds,
     highlightParagraphIds,
     searchQuery,
     loading,
@@ -221,6 +222,7 @@ export function KnowledgeGraphPage() {
               selectedEntityId={selectedEntityId}
               hoveredEntityId={hoveredEntityId}
               entityTypeFilter={entityTypeFilter}
+              pinnedEntityIds={pinnedEntityIds}
               searchQuery={searchQuery}
               onEntityClick={handleEntityClick}
               onEntityDoubleClick={handleEntityDoubleClick}
